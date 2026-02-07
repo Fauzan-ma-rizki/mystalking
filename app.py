@@ -1,67 +1,118 @@
 import streamlit as st
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
+from io import BytesIO
 import requests
 
-# --- LOGIKA FOTO ---
-def get_gps_data(image):
-    exif = image._getexif()
-    if not exif: return None
-    gps_info = {}
-    for (idx, tag) in TAGS.items():
-        if tag == 'GPSInfo':
-            for (key, val) in GPSTAGS.items():
-                if key in exif[idx]:
-                    gps_info[val] = exif[idx][key]
-    return gps_info
+# --- FUNGSI LOGIKA (VERSI AMAN) ---
+def get_gps_data(image_bytes):
+    try:
+        image = Image.open(BytesIO(image_bytes))
+        exif = image._getexif()
+        if not exif:
+            return None, None
+        
+        # Ambil info HP dengan aman
+        info_hp = {}
+        for (idx, tag) in TAGS.items():
+            val = exif.get(idx)
+            if val:
+                info_hp[tag] = val
+        
+        # Ambil info GPS dengan aman (Cegah KeyError)
+        gps_info = {}
+        for (idx, tag) in TAGS.items():
+            if tag == 'GPSInfo':
+                gps_data = exif.get(idx) # Gunakan .get() biar gak crash
+                if gps_data and isinstance(gps_data, dict):
+                    for (key, val) in GPSTAGS.items():
+                        if key in gps_data:
+                            gps_info[val] = gps_data[key]
+                    return gps_info, info_hp
+        return None, info_hp
+    except Exception as e:
+        return None, None
 
 def convert_to_degrees(value):
     try:
-        d, m, s = float(value[0]), float(value[1]), float(value[2])
+        d = float(value[0])
+        m = float(value[1])
+        s = float(value[2])
         return d + (m / 60.0) + (s / 3600.0)
-    except: return 0.0
+    except:
+        return None
 
-def get_lat_lon(gps_info):
-    try:
-        lat = convert_to_degrees(gps_info['GPSLatitude'])
-        if gps_info.get('GPSLatitudeRef') != 'N': lat = -lat
-        lon = convert_to_degrees(gps_info['GPSLongitude'])
-        if gps_info.get('GPSLongitudeRef') != 'E': lon = -lon
-        return lat, lon
-    except: return None
+# --- UI MATA FAUZAN ---
+st.set_page_config(page_title="Mata Fauzan Pro", page_icon="👁️", layout="centered")
 
-# --- UI ---
-st.set_page_config(page_title="Mata Fauzan Pro", page_icon="👁️")
-st.title("👁️ Mata Fauzan - Tracking Mode")
+st.markdown("<h1 style='text-align: center;'>👁️ Mata Fauzan</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center;'>OSINT Tool: Photo & IP Tracker</p>", unsafe_allow_html=True)
 
-mode = st.sidebar.radio("Pilih Mode:", ["📸 Foto GPS", "🌐 IP Tracker"])
+with st.sidebar:
+    st.header("⚙️ Navigasi")
+    mode = st.radio("Pilih Mode Pelacakan:", ["📸 Foto GPS", "🌐 IP Tracker"])
+    st.markdown("---")
+    st.caption("Tips: Kirim foto via 'Document' WhatsApp agar metadata tidak hilang.")
 
+# --- MODE 1: FOTO ---
 if mode == "📸 Foto GPS":
-    st.header("Pelacakan Foto")
-    up = st.file_uploader("Upload Foto Asli (Document)", type=["jpg", "jpeg", "png"])
+    st.subheader("📸 Analisis Metadata Foto")
+    up = st.file_uploader("Upload Foto (.jpg, .jpeg, .png)", type=["jpg", "jpeg", "png"])
+    
     if up:
-        img = Image.open(up)
-        st.image(img, width=400)
-        exif = img._getexif()
-        if exif:
-            gps = get_gps_data(img)
-            info_hp = {TAGS.get(i): exif.get(i) for i in exif}
-            st.write(f"**HP:** {info_hp.get('Make')} {info_hp.get('Model')}")
+        file_bytes = up.read()
+        gps, info_hp = get_gps_data(file_bytes)
+        
+        st.image(file_bytes, use_container_width=True)
+        
+        if info_hp:
+            st.success("✅ Metadata Berhasil Dibaca")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.info(f"**📱 Merk:** {info_hp.get('Make', 'N/A')}")
+            with col2:
+                st.info(f"**📱 Model:** {info_hp.get('Model', 'N/A')}")
+            
             if gps:
-                coords = get_lat_lon(gps)
-                st.success(f"Lokasi: {coords[0]}, {coords[1]}")
-                st.map({"lat": [coords[0]], "lon": [coords[1]]})
-            else: st.warning("Tidak ada data GPS.")
-        else: st.error("Metadata tidak ditemukan.")
+                lat = convert_to_degrees(gps.get('GPSLatitude'))
+                lon = convert_to_degrees(gps.get('GPSLongitude'))
+                
+                if lat is not None and lon is not None:
+                    # Cek arah (N/S, E/W)
+                    if gps.get('GPSLatitudeRef') != 'N': lat = -lat
+                    if gps.get('GPSLongitudeRef') != 'E': lon = -lon
+                    
+                    st.subheader("📍 Lokasi Ditemukan")
+                    st.write(f"Koordinat: `{lat}, {lon}`")
+                    st.map({"lat": [lat], "lon": [lon]})
+                    st.markdown(f"[🔗 Buka di Google Maps](https://www.google.com/maps?q={lat},{lon})")
+                else:
+                    st.warning("⚠️ Koordinat GPS tidak lengkap atau rusak.")
+            else:
+                st.warning("⚠️ Foto ini tidak mengandung data lokasi (GPS).")
+        else:
+            st.error("❌ Gagal mengambil metadata. Pastikan file bukan hasil screenshot.")
 
+# --- MODE 2: IP ---
 elif mode == "🌐 IP Tracker":
-    st.header("Lacak Alamat IP")
-    ip_in = st.text_input("Masukkan IP:")
-    if st.button("Lacak") and ip_in:
-        res = requests.get(f"http://ip-api.com/json/{ip_in}").json()
-        if res['status'] == 'success':
-            st.write(f"**Kota:** {res['city']}, {res['country']}")
-            st.write(f"**ISP:** {res['isp']}")
-            st.map({"lat": [res['lat']], "lon": [res['lon']]})
+    st.subheader("🌐 Pelacakan Alamat IP")
+    ip_in = st.text_input("Masukkan IP Target:", placeholder="Contoh: 114.124.xxx.xxx")
+    
+    if st.button("Lacak IP") and ip_in:
+        try:
+            res = requests.get(f"http://ip-api.com/json/{ip_in}", timeout=10).json()
+            if res.get('status') == 'success':
+                st.success(f"📍 IP Berasal dari {res['city']}, {res['country']}")
+                
+                c1, c2 = st.columns(2)
+                c1.write(f"**ISP:** {res.get('isp')}")
+                c2.write(f"**Timezone:** {res.get('timezone')}")
+                
+                st.map({"lat": [res['lat']], "lon": [res['lon']]})
+            else:
+                st.error("❌ IP tidak valid atau tidak terdaftar.")
+        except:
+            st.error("❌ Gagal menghubungkan ke server pelacak.")
 
-st.sidebar.caption("Mata Fauzan")
+st.markdown("---")
+st.caption("Mata Fauzan")
